@@ -1,4 +1,4 @@
-# ORBIT — game store
+## ORBIT — game store
 
 A cinematic, responsive PC game storefront built with Next.js App Router, TypeScript, React, and CSS. Includes animated orbital artwork, genre/search/sort controls, product detail dialogs, a persistent cart and wishlist, and a clearly labeled demo checkout.
 
