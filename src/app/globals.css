@@ -2086,12 +2086,13 @@ select {
   }
 }
 .cinematic-spotlight {
-  height: 490px;
+  height: auto;
+  min-height: 490px;
   border-color: #455339;
 }
 .spotlight-scene {
-  position: absolute;
-  inset: 0;
+  position: relative;
+  min-height: 490px;
   animation: scene-enter 900ms var(--ease-cinema) both;
 }
 @keyframes scene-enter {
@@ -2153,7 +2154,7 @@ select {
 .cinematic-spotlight .spotlight-content {
   width: 65%;
   max-width: 730px;
-  padding: 42px;
+  padding: 42px 42px 100px;
 }
 .cinematic-spotlight h2 {
   font-size: clamp(38px, 4.5vw, 64px);
@@ -2507,11 +2508,11 @@ main[data-motion="off"] .scroll-progress {
     text-align: center;
   }
   .cinematic-spotlight {
-    height: 560px;
+    min-height: 560px;
   }
   .cinematic-spotlight .spotlight-content {
     width: 100%;
-    padding: 30px 24px;
+    padding: 30px 24px 100px;
   }
   .cinematic-spotlight h2 {
     font-size: 46px;
