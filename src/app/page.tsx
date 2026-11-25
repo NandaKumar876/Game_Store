@@ -2,6 +2,12 @@
 import { useEffect, useRef, useState } from "react";
 import {
   ArrowDown,
+  ChevronLeft,
+  ChevronRight,
+  Library,
+  Pause,
+  Play,
+  RefreshCw,
   ArrowRight,
   ArrowUpRight,
   Check,
@@ -22,8 +28,31 @@ import {
 } from "lucide-react";
 import { games, money, cover, type Game } from "@/lib/games";
 
-type Panel = "cart" | "wishlist" | "checkout" | null;
+type Panel = "cart" | "wishlist" | "checkout" | "library" | null;
+type Receipt = {
+  id: string;
+  totalCents: number;
+  items: { id: number; title: string; priceCents: number }[];
+};
+const featuredIds = [1091500, 1245620, 1174180, 1551360];
 export default function Home() {
+  const [catalog, setCatalog] = useState<Game[]>(games);
+  const [catalogStatus, setCatalogStatus] = useState<
+    "loading" | "ready" | "error"
+  >("loading");
+  const [refresh, setRefresh] = useState(0);
+  const [budget, setBudget] = useState("all");
+  const [library, setLibrary] = useState<number[]>([]);
+  const [receipt, setReceipt] = useState<Receipt | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [checkoutError, setCheckoutError] = useState("");
+  const checkoutLock = useRef(false);
+  const [motion, setMotion] = useState(true);
+  const [slide, setSlide] = useState(0);
+  const [spotlightPaused, setSpotlightPaused] = useState(false);
+  const [spotlightVisible, setSpotlightVisible] = useState(false);
+  const [pageVisible, setPageVisible] = useState(true);
+  const spotlight = useRef<HTMLElement>(null);
   const [query, setQuery] = useState("");
   const [genre, setGenre] = useState("All games");
   const [sort, setSort] = useState("popular");
@@ -38,9 +67,102 @@ export default function Home() {
   const [joined, setJoined] = useState(false);
   const dialog = useRef<HTMLDialogElement>(null);
   useEffect(() => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
+    let active = true;
+    setCatalogStatus("loading");
+    fetch("/api/store", { signal: controller.signal, cache: "no-store" })
+      .then(async (response) => {
+        if (!response.ok) throw new Error("Catalog unavailable");
+        const data = await response.json();
+        if (!Array.isArray(data.games) || data.games.length === 0)
+          throw new Error("Empty catalog");
+        if (active) {
+          setCatalog(data.games);
+          setCatalogStatus("ready");
+        }
+      })
+      .catch(() => {
+        if (active) setCatalogStatus("error");
+      })
+      .finally(() => clearTimeout(timeout));
+    return () => {
+      active = false;
+      controller.abort();
+      clearTimeout(timeout);
+    };
+  }, [refresh]);
+  useEffect(() => {
+    const preference = matchMedia("(prefers-reduced-motion: reduce)");
+    const syncMotion = () => setMotion(!preference.matches);
+    const syncVisibility = () => setPageVisible(!document.hidden);
+    syncMotion();
+    syncVisibility();
+    preference.addEventListener("change", syncMotion);
+    document.addEventListener("visibilitychange", syncVisibility);
+    const observer = new IntersectionObserver(([entry]) =>
+      setSpotlightVisible(entry.isIntersecting),
+    );
+    if (spotlight.current) observer.observe(spotlight.current);
+    return () => {
+      preference.removeEventListener("change", syncMotion);
+      document.removeEventListener("visibilitychange", syncVisibility);
+      observer.disconnect();
+    };
+  }, []);
+  useEffect(() => {
+    if (
+      !motion ||
+      spotlightPaused ||
+      !spotlightVisible ||
+      !pageVisible ||
+      panel ||
+      selected
+    )
+      return;
+    const timer = setInterval(
+      () => setSlide((current) => (current + 1) % featuredIds.length),
+      7000,
+    );
+    return () => clearInterval(timer);
+  }, [
+    motion,
+    spotlightPaused,
+    spotlightVisible,
+    pageVisible,
+    panel,
+    selected,
+    slide,
+  ]);
+  useEffect(() => {
+    if (!motion) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          if (entry.isIntersecting) {
+            entry.target.classList.add("is-revealed");
+            observer.unobserve(entry.target);
+          }
+        });
+      },
+      { threshold: 0.08 },
+    );
+    document
+      .querySelectorAll("[data-reveal]")
+      .forEach((element) => observer.observe(element));
+    return () => observer.disconnect();
+  }, [motion]);
+  useEffect(() => {
     try {
       const c = JSON.parse(localStorage.getItem("orbit-cart") || "[]");
       const w = JSON.parse(localStorage.getItem("orbit-wishlist") || "[]");
+      const owned = JSON.parse(localStorage.getItem("orbit-library") || "[]");
+      if (Array.isArray(owned))
+        setLibrary([
+          ...new Set(
+            owned.filter((id: number) => games.some((g) => g.id === id)),
+          ),
+        ]);
       if (Array.isArray(c))
         setCart([
           ...new Set(c.filter((id: number) => games.some((g) => g.id === id))),
@@ -57,8 +179,9 @@ export default function Home() {
       try {
         localStorage.setItem("orbit-cart", JSON.stringify(cart));
         localStorage.setItem("orbit-wishlist", JSON.stringify(wishlist));
+        localStorage.setItem("orbit-library", JSON.stringify(library));
       } catch {}
-  }, [cart, wishlist, ready]);
+  }, [cart, wishlist, library, ready]);
   useEffect(() => {
     if (!toast) return;
     const timer = setTimeout(() => setToast(""), 2800);
@@ -76,11 +199,54 @@ export default function Home() {
       document.body.style.overflow = "";
     };
   }, [panel, selected]);
+  async function checkout() {
+    if (checkoutLock.current || cart.length === 0) return;
+    checkoutLock.current = true;
+    setSubmitting(true);
+    setCheckoutError("");
+    try {
+      const response = await fetch("/api/store", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids: cart, demo: true }),
+        signal: AbortSignal.timeout(10000),
+      });
+      const result = await response.json();
+      if (!response.ok)
+        throw new Error(result.error || "Checkout could not be completed.");
+      setReceipt(result);
+      setLibrary((current) => [
+        ...new Set([
+          ...current,
+          ...result.items.map((item: { id: number }) => item.id),
+        ]),
+      ]);
+      setCart((current) =>
+        current.filter(
+          (id) => !result.items.some((item: { id: number }) => item.id === id),
+        ),
+      );
+      setToast("Demo complete. Your collection has been updated.");
+    } catch (error) {
+      setCheckoutError(
+        error instanceof Error && error.name !== "TimeoutError"
+          ? error.message
+          : "Connection timed out. Your cart is safe. Please try again.",
+      );
+    } finally {
+      checkoutLock.current = false;
+      setSubmitting(false);
+    }
+  }
   function close() {
     setPanel(null);
     setSelected(null);
   }
   function add(game: Game) {
+    if (library.includes(game.id)) {
+      setToast(game.title + " is already in your demo library");
+      return;
+    }
     setCart((c) => (c.includes(game.id) ? c : [...c, game.id]));
     setToast(game.title + " added to your cart");
   }
@@ -92,25 +258,40 @@ export default function Home() {
   function browse(category = "All games") {
     setGenre(category);
     setNav(false);
-    document.getElementById("catalog")?.scrollIntoView({ behavior: "smooth" });
+    document
+      .getElementById("catalog")
+      ?.scrollIntoView({ behavior: motion ? "smooth" : "instant" });
   }
-  const filtered = games
+  const filtered = catalog
     .filter(
       (g) =>
         (genre === "All games" || g.genre === genre) &&
-        g.title.toLowerCase().includes(query.toLowerCase()),
+        (g.title + " " + g.genre)
+          .toLowerCase()
+          .includes(query.trim().toLowerCase()) &&
+        (budget === "all" || g.price <= Number(budget)),
     )
     .sort((a, b) =>
       sort === "low"
         ? a.price - b.price
-        : sort === "rating"
-          ? Number(b.rating) - Number(a.rating)
-          : 0,
+        : sort === "high"
+          ? b.price - a.price
+          : sort === "discount"
+            ? 1 - b.price / b.original - (1 - a.price / a.original)
+            : sort === "rating"
+              ? Number(b.rating) - Number(a.rating)
+              : 0,
     );
-  const cartGames = games.filter((g) => cart.includes(g.id));
+  const featured =
+    catalog.find((game) => game.id === featuredIds[slide]) ?? catalog[0];
+  const cartGames = catalog.filter((g) => cart.includes(g.id));
   const total = cartGames.reduce((s, g) => s + g.price, 0);
   return (
-    <main>
+    <main data-motion={motion ? "on" : "off"}>
+      <a className="skip-link" href="#catalog">
+        Skip to games
+      </a>
+      <div className="scroll-progress" aria-hidden="true" />
       <div className="announcement">
         <span className="live-dot" /> THE NEXT LEVEL IS HERE{" "}
         <span className="announcement-divider">/</span> Discover your next
@@ -146,6 +327,22 @@ export default function Home() {
         </nav>
         <div className="header-actions">
           <button
+            className="icon-button motion-toggle"
+            aria-label={motion ? "Pause motion" : "Enable motion"}
+            aria-pressed={motion}
+            onClick={() => setMotion((current) => !current)}
+          >
+            {motion ? <Pause size={18} /> : <Play size={18} />}
+          </button>
+          <button
+            className="icon-button"
+            aria-label="Open demo library"
+            onClick={() => setPanel("library")}
+          >
+            <Library size={19} />
+            {library.length > 0 && <b>{library.length}</b>}
+          </button>
+          <button
             aria-label="Open wishlist"
             className="icon-button"
             onClick={() => setPanel("wishlist")}
@@ -173,9 +370,29 @@ export default function Home() {
           </button>
         </div>
       </header>
-      <section className="hero shell">
+      <section
+        className="hero shell"
+        onPointerMove={(event) => {
+          if (!motion || event.pointerType !== "mouse") return;
+          const rect = event.currentTarget.getBoundingClientRect();
+          event.currentTarget.style.setProperty(
+            "--pointer-x",
+            ((event.clientX - rect.left) / rect.width - 0.5) * 20 + "px",
+          );
+          event.currentTarget.style.setProperty(
+            "--pointer-y",
+            ((event.clientY - rect.top) / rect.height - 0.5) * 14 + "px",
+          );
+        }}
+        onPointerLeave={(event) => {
+          event.currentTarget.style.setProperty("--pointer-x", "0px");
+          event.currentTarget.style.setProperty("--pointer-y", "0px");
+        }}
+      >
         <div className="hero-art" aria-hidden="true">
           <div className="starfield" />
+          <div className="nebula" />
+          <div className="shooting-star" />
           <div className="orbital orbit-one" />
           <div className="orbital orbit-two" />
           <div className="planet">
@@ -258,7 +475,7 @@ export default function Home() {
           Great games. Better prices.
         </span>
       </div>
-      <section id="catalog" className="catalog shell">
+      <section id="catalog" className="catalog shell" data-reveal>
         <div className="section-heading">
           <div>
             <div className="eyebrow muted">
@@ -270,7 +487,7 @@ export default function Home() {
           </div>
           <div className="catalog-count">
             <span className="live-dot" />
-            {games.length} handpicked adventures
+            {catalog.length} handpicked adventures
           </div>
         </div>
         <div className="catalog-tools">
@@ -286,6 +503,7 @@ export default function Home() {
               <button
                 key={c}
                 className={genre === c ? "selected" : ""}
+                aria-pressed={genre === c}
                 onClick={() => setGenre(c)}
               >
                 {c === "All games" && <Gamepad2 size={15} />} {c}
@@ -316,12 +534,59 @@ export default function Home() {
               >
                 <option value="popular">Featured</option>
                 <option value="low">Price: low to high</option>
+                <option value="high">Price: high to low</option>
                 <option value="rating">Top rated</option>
+                <option value="discount">Biggest discount</option>
               </select>
             </label>
           </div>
         </div>
-        <div className="game-grid">
+        <div className="catalog-toolbar">
+          <div className="budget-filter">
+            <label htmlFor="budget">Your budget</label>
+            <select
+              id="budget"
+              value={budget}
+              onChange={(event) => setBudget(event.target.value)}
+            >
+              <option value="all">Any price</option>
+              <option value="15">Under $15</option>
+              <option value="25">Under $25</option>
+              <option value="40">Under $40</option>
+            </select>
+          </div>
+          <p role="status" className="catalog-status">
+            {catalogStatus === "loading"
+              ? "Connecting to catalog…"
+              : catalogStatus === "error"
+                ? "Offline preview · checkout needs a connection"
+                : filtered.length + " of " + catalog.length + " adventures"}
+          </p>
+          {catalogStatus === "error" && (
+            <button
+              className="button secondary"
+              onClick={() => setRefresh((value) => value + 1)}
+            >
+              <RefreshCw size={16} /> Retry catalog
+            </button>
+          )}
+          {(query || genre !== "All games" || budget !== "all") && (
+            <button
+              className="reset-filters"
+              onClick={() => {
+                setQuery("");
+                setGenre("All games");
+                setBudget("all");
+              }}
+            >
+              Clear filters <X size={14} />
+            </button>
+          )}
+        </div>
+        <div
+          className="game-grid"
+          key={genre + ":" + query + ":" + sort + ":" + budget}
+        >
           {filtered.map((game, index) => (
             <article
               className="game-card"
@@ -366,10 +631,15 @@ export default function Home() {
                 </span>
                 <button
                   className="quick-add"
-                  aria-label={"Add " + game.title + " to cart"}
+                  disabled={!ready || library.includes(game.id)}
+                  aria-label={
+                    library.includes(game.id)
+                      ? game.title + " in demo library"
+                      : "Add " + game.title + " to cart"
+                  }
                   onClick={() => add(game)}
                 >
-                  {cart.includes(game.id) ? (
+                  {cart.includes(game.id) || library.includes(game.id) ? (
                     <Check size={19} />
                   ) : (
                     <Plus size={19} />
@@ -408,6 +678,7 @@ export default function Home() {
               onClick={() => {
                 setQuery("");
                 setGenre("All games");
+                setBudget("all");
               }}
             >
               Reset filters
@@ -419,44 +690,114 @@ export default function Home() {
           <Sparkles size={14} />
         </div>
       </section>
-      <section id="spotlight" className="spotlight shell">
-        <img
-          src="/games/spotlight.jpg"
-          alt="Night City from Cyberpunk 2077"
-          loading="lazy"
-        />
-        <div className="spotlight-shade" />
-        <div className="spotlight-content">
-          <div className="eyebrow">
-            <Zap size={14} /> THE ORBIT SPOTLIGHT
+      <section
+        id="spotlight"
+        className="spotlight shell cinematic-spotlight"
+        ref={spotlight}
+        data-reveal
+        aria-label="Featured games"
+        aria-roledescription="carousel"
+        onMouseEnter={() => setSpotlightPaused(true)}
+        onMouseLeave={() => {
+          if (!spotlight.current?.contains(document.activeElement))
+            setSpotlightPaused(false);
+        }}
+        onFocusCapture={() => setSpotlightPaused(true)}
+        onBlurCapture={(event) => {
+          if (!event.currentTarget.contains(event.relatedTarget as Node))
+            setSpotlightPaused(false);
+        }}
+      >
+        <div
+          key={featured.id}
+          className="spotlight-scene"
+          aria-live={spotlightPaused || !motion ? "polite" : "off"}
+        >
+          <img
+            className="spotlight-backdrop"
+            src={
+              featured.id === 1091500
+                ? "/games/spotlight.jpg"
+                : cover(featured.id)
+            }
+            alt=""
+            loading="lazy"
+          />
+          <div className="spotlight-shade" />
+          <img
+            className="spotlight-cover"
+            src={cover(featured.id)}
+            alt={featured.title + " featured artwork"}
+            loading="lazy"
+          />
+          <div className="spotlight-content">
+            <div className="eyebrow">
+              <Zap size={14} /> THE ORBIT SPOTLIGHT
+            </div>
+            <h2>
+              {featured.title}
+              <span>.</span>
+            </h2>
+            <p>{featured.description}</p>
+            <div className="spotlight-price">
+              <span className="discount">
+                −{Math.round((1 - featured.price / featured.original) * 100)}%
+              </span>
+              <del>{money(featured.original)}</del>
+              <strong>{money(featured.price)}</strong>
+            </div>
+            <button
+              className="button primary"
+              onClick={() => setSelected(featured)}
+            >
+              Discover {featured.title} <Gamepad2 size={18} />
+            </button>
           </div>
-          <h2>
-            Welcome to
-            <br />
-            the neon future.
-          </h2>
-          <p>
-            Night City is calling. Make a name for yourself
-            <br />
-            in Cyberpunk 2077’s electric open world.
-          </p>
-          <div className="spotlight-price">
-            <span className="discount">−50%</span>
-            <del>$59.99</del>
-            <strong>$29.99</strong>
+        </div>
+        <div className="spotlight-controls">
+          <div className="slide-picker" aria-label="Choose featured game">
+            {featuredIds.map((id, index) => (
+              <button
+                key={id}
+                aria-label={
+                  "Feature " +
+                  (catalog.find((game) => game.id === id)?.title ?? "game")
+                }
+                aria-pressed={slide === index}
+                onClick={() => setSlide(index)}
+              >
+                <span />
+              </button>
+            ))}
           </div>
+          <span className="slide-counter">
+            {String(slide + 1).padStart(2, "0")} /{" "}
+            {String(featuredIds.length).padStart(2, "0")}
+          </span>
           <button
-            className="button primary"
-            onClick={() => setSelected(games[0])}
+            className="icon-button"
+            aria-label="Previous featured game"
+            onClick={() =>
+              setSlide(
+                (current) =>
+                  (current + featuredIds.length - 1) % featuredIds.length,
+              )
+            }
           >
-            Discover Cyberpunk 2077 <ArrowUpRight size={18} />
+            <ChevronLeft size={20} />
+          </button>
+          <button
+            className="icon-button"
+            aria-label="Next featured game"
+            onClick={() =>
+              setSlide((current) => (current + 1) % featuredIds.length)
+            }
+          >
+            <ChevronRight size={20} />
           </button>
         </div>
-        <div className="spotlight-number">
-          01 <span>/ SPOTLIGHT</span>
-        </div>
       </section>
-      <section className="community shell" id="community">
+      <section className="community shell" id="community" data-reveal>
         <div className="community-icon">
           <Orbit size={60} strokeWidth={1} />
           <div />
@@ -512,9 +853,11 @@ export default function Home() {
             ? selected.title
             : panel === "wishlist"
               ? "Your wishlist"
-              : panel === "checkout"
-                ? "Checkout preview"
-                : "Your cart"
+              : panel === "library"
+                ? "Your demo library"
+                : panel === "checkout"
+                  ? "Checkout preview"
+                  : "Your cart"
         }
         ref={dialog}
         onCancel={close}
@@ -522,7 +865,7 @@ export default function Home() {
           if (e.target === dialog.current) close();
         }}
       >
-        <div className="dialog-inner">
+        <div className="dialog-inner" key={selected?.id ?? panel}>
           <button
             className="dialog-close icon-button"
             onClick={close}
@@ -559,10 +902,14 @@ export default function Home() {
                 onClick={() => {
                   add(selected);
                   setSelected(null);
-                  setPanel("cart");
+                  setPanel(library.includes(selected.id) ? "library" : "cart");
                 }}
               >
-                {cart.includes(selected.id) ? "View in cart" : "Add to cart"}
+                {library.includes(selected.id)
+                  ? "In your demo library"
+                  : cart.includes(selected.id)
+                    ? "View in cart"
+                    : "Add to cart"}
                 <ShoppingBag size={18} />
               </button>
               <p className="fine-print">
@@ -575,14 +922,30 @@ export default function Home() {
               <div className="checkout-icon">
                 <ShieldCheck size={38} />
               </div>
-              <div className="eyebrow muted">CHECKOUT PREVIEW</div>
-              <h2>Ready for your next adventure?</h2>
+              <div className="eyebrow muted">
+                {receipt ? "MISSION COMPLETE" : "CHECKOUT PREVIEW"}
+              </div>
+              <h2>
+                {receipt
+                  ? "Your next world is waiting."
+                  : "Ready for your next adventure?"}
+              </h2>
               <p>
                 This is a demo storefront. Payments and game delivery are not
                 connected, and you won’t be charged.
               </p>
+              {receipt && (
+                <p className="order-reference">Demo receipt: {receipt.id}</p>
+              )}
               <div className="receipt">
-                {cartGames.map((g) => (
+                {(receipt
+                  ? receipt.items.map((item) => ({
+                      id: item.id,
+                      title: item.title,
+                      price: item.priceCents / 100,
+                    }))
+                  : cartGames
+                ).map((g) => (
                   <div key={g.id}>
                     <span>{g.title}</span>
                     <strong>{money(g.price)}</strong>
@@ -590,11 +953,48 @@ export default function Home() {
                 ))}
                 <div className="receipt-total">
                   <span>Total · USD</span>
-                  <strong>{money(total)}</strong>
+                  <strong>
+                    {money(receipt ? receipt.totalCents / 100 : total)}
+                  </strong>
                 </div>
               </div>
+              {checkoutError && (
+                <p className="checkout-error" role="alert">
+                  {checkoutError}
+                </p>
+              )}
+              {receipt ? (
+                <button
+                  className="button primary full"
+                  onClick={() => setPanel("library")}
+                >
+                  <Library size={18} /> Open demo library
+                </button>
+              ) : (
+                <button
+                  className="button primary full"
+                  disabled={submitting || !ready || cart.length === 0}
+                  onClick={checkout}
+                >
+                  {submitting ? (
+                    <>
+                      <RefreshCw className="loading-icon" size={18} />{" "}
+                      Confirming with server…
+                    </>
+                  ) : (
+                    <>
+                      <Check size={18} /> Complete demo order
+                    </>
+                  )}
+                </button>
+              )}
+              <p className="fine-print">
+                Demo collection is saved in this browser. No downloads or
+                license keys.
+              </p>
               <button
-                className="button primary full"
+                className="button secondary full"
+                disabled={submitting}
                 onClick={() => setPanel("cart")}
               >
                 Back to your cart <ArrowRight size={18} />
@@ -604,12 +1004,24 @@ export default function Home() {
             <>
               <div className="eyebrow muted">YOUR NEXT ADVENTURE</div>
               <h2>
-                {panel === "wishlist" ? "Your wishlist" : "Your cart"}
+                {panel === "wishlist"
+                  ? "Your wishlist"
+                  : panel === "library"
+                    ? "Your demo library"
+                    : "Your cart"}
                 <span>.</span>
               </h2>
-              {(panel === "wishlist"
-                ? games.filter((g) => wishlist.includes(g.id))
-                : cartGames
+              {panel === "library" && (
+                <p>
+                  Your demo collection, saved on this device. No games were
+                  purchased and no keys are delivered.
+                </p>
+              )}
+              {(panel === "library"
+                ? catalog.filter((g) => library.includes(g.id))
+                : panel === "wishlist"
+                  ? catalog.filter((g) => wishlist.includes(g.id))
+                  : cartGames
               ).map((g) => (
                 <div className="cart-row" key={g.id}>
                   <img src={cover(g.id)} alt="" />
@@ -635,10 +1047,15 @@ export default function Home() {
                     <button
                       className="icon-button"
                       aria-label={"Remove " + g.title}
+                      disabled={submitting}
                       onClick={() =>
-                        panel === "wishlist"
-                          ? wish(g.id)
-                          : setCart((c) => c.filter((id) => id !== g.id))
+                        panel === "library"
+                          ? setLibrary((current) =>
+                              current.filter((id) => id !== g.id),
+                            )
+                          : panel === "wishlist"
+                            ? wish(g.id)
+                            : setCart((c) => c.filter((id) => id !== g.id))
                       }
                     >
                       <X size={17} />
@@ -646,7 +1063,11 @@ export default function Home() {
                   </div>
                 </div>
               ))}
-              {(panel === "wishlist" ? wishlist.length : cart.length) === 0 ? (
+              {(panel === "library"
+                ? library.length
+                : panel === "wishlist"
+                  ? wishlist.length
+                  : cart.length) === 0 ? (
                 <div className="empty">
                   <Gamepad2 size={40} />
                   <h3>Your next favorite is out there.</h3>
@@ -673,7 +1094,12 @@ export default function Home() {
                   </div>
                   <button
                     className="button primary full"
-                    onClick={() => setPanel("checkout")}
+                    disabled={submitting || !ready}
+                    onClick={() => {
+                      setReceipt(null);
+                      setCheckoutError("");
+                      setPanel("checkout");
+                    }}
                   >
                     Preview checkout <ArrowRight size={18} />
                   </button>
